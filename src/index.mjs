@@ -449,11 +449,28 @@ async function getIssue(issueId) {
     attachedTo: issue._id
   });
 
+  // Fetch actual description content (stored as collaborative document)
+  let descriptionContent = '';
+  if (issue.description) {
+    try {
+      descriptionContent = await client.fetchMarkup(
+        tracker.class.Issue,
+        issue._id,
+        'description',
+        issue.description,
+        'markdown'
+      );
+    } catch (err) {
+      // Fall back to empty if fetch fails
+      console.error('Failed to fetch description:', err.message);
+    }
+  }
+
   return {
     id: `${project.identifier}-${issue.number}`,
     internalId: issue._id,
     title: issue.title,
-    description: issue.description || '',
+    description: descriptionContent,
     status: status?.name || 'Unknown',
     priority: PRIORITY_NAMES[issue.priority] || 'Unknown',
     labels: issueLabels.map(l => l.title),
