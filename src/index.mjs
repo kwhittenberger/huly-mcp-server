@@ -40,23 +40,63 @@ const PRIORITY_NAMES = ['No Priority', 'Urgent', 'High', 'Medium', 'Low'];
 
 // Cached client connection
 let cachedClient = null;
+let connectionPromise = null;
+
+async function createConnection() {
+  if (!HULY_EMAIL || !HULY_PASSWORD || !HULY_WORKSPACE) {
+    throw new Error('Missing required environment variables: HULY_EMAIL, HULY_PASSWORD, HULY_WORKSPACE');
+  }
+
+  const client = await connect(HULY_URL, {
+    email: HULY_EMAIL,
+    password: HULY_PASSWORD,
+    workspace: HULY_WORKSPACE
+  });
+
+  return client;
+}
 
 async function getClient() {
   if (cachedClient) {
     return cachedClient;
   }
 
-  if (!HULY_EMAIL || !HULY_PASSWORD || !HULY_WORKSPACE) {
-    throw new Error('Missing required environment variables: HULY_EMAIL, HULY_PASSWORD, HULY_WORKSPACE');
+  // Prevent multiple simultaneous connection attempts
+  if (connectionPromise) {
+    return connectionPromise;
   }
 
-  cachedClient = await connect(HULY_URL, {
-    email: HULY_EMAIL,
-    password: HULY_PASSWORD,
-    workspace: HULY_WORKSPACE
-  });
+  connectionPromise = createConnection();
+  try {
+    cachedClient = await connectionPromise;
+    return cachedClient;
+  } finally {
+    connectionPromise = null;
+  }
+}
 
-  return cachedClient;
+function clearConnection() {
+  cachedClient = null;
+  connectionPromise = null;
+}
+
+async function withReconnect(operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    // Check if this is a connection error
+    if (error.message?.includes('ConnectionClosed') ||
+        error.message?.includes('connection') ||
+        error.message?.includes('ECONNREFUSED') ||
+        error.message?.includes('socket') ||
+        error.code === 'ECONNRESET') {
+      console.error('Connection lost, attempting reconnect...');
+      clearConnection();
+      // Retry once with fresh connection
+      return await operation();
+    }
+    throw error;
+  }
 }
 
 // Tool definitions
@@ -787,12 +827,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   return { tools: TOOLS };
 });
 
-// Call tool handler
+// Call tool handler with auto-reconnect
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
-    const result = await handleToolCall(name, args || {});
+    const result = await withReconnect(async () => {
+      return await handleToolCall(name, args || {});
+    });
     return {
       content: [
         {
