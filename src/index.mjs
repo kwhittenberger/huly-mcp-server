@@ -997,7 +997,7 @@ async function setParent(issueId, parentIssueId) {
   const { project, issue } = await parseAndFindIssue(client, issueId);
   const { project: parentProject, issue: parentIssue } = await parseAndFindIssue(client, parentIssueId);
 
-  // Build parent info
+  // Build parent info for the child
   const parentInfo = {
     parentId: parentIssue._id,
     identifier: `${parentProject.identifier}-${parentIssue.number}`,
@@ -1011,13 +1011,38 @@ async function setParent(issueId, parentIssueId) {
     parents: [parentInfo]
   });
 
-  // Update parent's subIssues count (if tracked)
-  // Note: This may be handled automatically by Huly
+  // Build child info for the parent
+  const childInfo = {
+    childId: issue._id,
+    estimation: issue.estimation || 0,
+    reportedTime: issue.reportedTime || 0
+  };
+
+  // Get current childInfo array from parent and add new child
+  const currentChildInfo = parentIssue.childInfo || [];
+
+  // Check if child is already in the list (avoid duplicates)
+  const existingIndex = currentChildInfo.findIndex(c => c.childId === issue._id);
+  let updatedChildInfo;
+  if (existingIndex >= 0) {
+    // Update existing entry
+    updatedChildInfo = [...currentChildInfo];
+    updatedChildInfo[existingIndex] = childInfo;
+  } else {
+    // Add new entry
+    updatedChildInfo = [...currentChildInfo, childInfo];
+  }
+
+  // Update parent's childInfo array
+  await client.updateDoc(tracker.class.Issue, parentProject._id, parentIssue._id, {
+    childInfo: updatedChildInfo
+  });
 
   return {
     message: `Set parent: ${issueId} is now a child of ${parentIssueId}`,
     issueId,
-    parentIssueId
+    parentIssueId,
+    parentChildCount: updatedChildInfo.length
   };
 }
 
