@@ -198,6 +198,10 @@ const TOOLS = [
           type: 'array',
           items: { type: 'string' },
           description: 'Labels to apply to the issue'
+        },
+        type: {
+          type: 'string',
+          description: 'Task type name (e.g., "Issue", "Epic", "Bug"). Use list_task_types to see available types.'
         }
       },
       required: ['project', 'title']
@@ -228,6 +232,10 @@ const TOOLS = [
         status: {
           type: 'string',
           description: 'New status: Backlog, Todo, In Progress, Done, Canceled'
+        },
+        type: {
+          type: 'string',
+          description: 'New task type name (e.g., "Issue", "Epic", "Bug"). Use list_task_types to see available types.'
         }
       },
       required: ['issueId']
@@ -348,6 +356,20 @@ const TOOLS = [
         }
       },
       required: ['issueId', 'parentIssueId']
+    }
+  },
+  {
+    name: 'list_task_types',
+    description: 'List all available task types for a project (e.g., Issue, Epic, Bug)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: {
+          type: 'string',
+          description: 'Project identifier (e.g., "PRYLA")'
+        }
+      },
+      required: ['project']
     }
   }
 ];
@@ -546,7 +568,7 @@ async function getIssue(issueId) {
   };
 }
 
-async function createIssue(projectIdent, title, description, priority, status, labels) {
+async function createIssue(projectIdent, title, description, priority, status, labels, type) {
   const client = await getClient();
 
   // Find project
@@ -578,6 +600,12 @@ async function createIssue(projectIdent, title, description, priority, status, l
     statusId = todoStatus?._id || statuses[0]?._id;
   }
 
+  // Find task type if specified
+  let taskTypeId = tracker.taskTypes.Issue;  // Default to Issue type
+  if (type) {
+    taskTypeId = await findTaskTypeByName(client, projectIdent, type);
+  }
+
   // Create issue using addCollection (Issues are AttachedDoc, not regular Doc)
   const issueId = generateId();
   await client.addCollection(
@@ -601,7 +629,7 @@ async function createIssue(projectIdent, title, description, priority, status, l
       reportedTime: 0,
       childInfo: [],
       parents: [],
-      kind: tracker.taskTypes.Issue
+      kind: taskTypeId
     },
     issueId
   );
@@ -644,7 +672,7 @@ async function createIssue(projectIdent, title, description, priority, status, l
   };
 }
 
-async function updateIssue(issueId, title, description, priority, status) {
+async function updateIssue(issueId, title, description, priority, status, type) {
   const client = await getClient();
 
   // Parse and find issue
@@ -693,6 +721,13 @@ async function updateIssue(issueId, title, description, priority, status) {
       updates.status = found._id;
       updatedFields.push('status');
     }
+  }
+
+  // Handle task type change
+  if (type !== undefined) {
+    const taskTypeId = await findTaskTypeByName(client, projectId, type);
+    updates.kind = taskTypeId;
+    updatedFields.push('type');
   }
 
   // Apply non-description updates
@@ -1057,6 +1092,80 @@ async function setParent(issueId, parentIssueId) {
   };
 }
 
+async function listTaskTypes(projectIdent) {
+  const client = await getClient();
+  const task = require('@hcengineering/task').default;
+
+  // Find project
+  const project = await client.findOne(tracker.class.Project, {
+    identifier: projectIdent.toUpperCase()
+  });
+
+  if (!project) {
+    throw new Error(`Project not found: ${projectIdent}`);
+  }
+
+  // Get the project type (space type) to find available task types
+  // Task types are linked to space types, and projects reference their type
+  const projectType = project.type;
+
+  // Query for task types associated with this project's space type
+  // TaskType is defined in the task plugin
+  const taskTypes = await client.findAll(task.class.TaskType, {});
+
+  // Filter to task types that are relevant to the tracker/this project
+  // TaskTypes have a parent property that links to the space type
+  const relevantTypes = taskTypes.filter(tt => {
+    // Check if this task type is for issues (tracker)
+    return tt.ofClass === tracker.class.Issue ||
+           tt.targetClass === tracker.class.Issue ||
+           (tt.descriptor && tt.descriptor.includes('tracker'));
+  });
+
+  // If no filtered results, return all task types for issues
+  const typesToReturn = relevantTypes.length > 0 ? relevantTypes : taskTypes.filter(tt =>
+    tt._id.includes('Issue') || tt._id.includes('tracker') || tt.name
+  );
+
+  return typesToReturn.map(tt => ({
+    id: tt._id,
+    name: tt.name || tt._id.split(':').pop(),
+    description: tt.description || '',
+    ofClass: tt.ofClass,
+    parent: tt.parent
+  }));
+}
+
+async function findTaskTypeByName(client, projectIdent, typeName) {
+  const task = require('@hcengineering/task').default;
+
+  // Find project
+  const project = await client.findOne(tracker.class.Project, {
+    identifier: projectIdent.toUpperCase()
+  });
+
+  if (!project) {
+    throw new Error(`Project not found: ${projectIdent}`);
+  }
+
+  // Query all task types
+  const taskTypes = await client.findAll(task.class.TaskType, {});
+
+  // Find by name (case-insensitive)
+  const found = taskTypes.find(tt => {
+    const name = tt.name || tt._id.split(':').pop();
+    return name.toLowerCase() === typeName.toLowerCase();
+  });
+
+  if (!found) {
+    // List available types in error message
+    const availableTypes = taskTypes.map(tt => tt.name || tt._id.split(':').pop()).join(', ');
+    throw new Error(`Task type "${typeName}" not found. Available types: ${availableTypes}`);
+  }
+
+  return found._id;
+}
+
 // Handle tool calls
 async function handleToolCall(name, args) {
   switch (name) {
@@ -1085,7 +1194,8 @@ async function handleToolCall(name, args) {
         args.description,
         args.priority,
         args.status,
-        args.labels
+        args.labels,
+        args.type
       );
 
     case 'update_issue':
@@ -1094,7 +1204,8 @@ async function handleToolCall(name, args) {
         args.title,
         args.description,
         args.priority,
-        args.status
+        args.status,
+        args.type
       );
 
     case 'add_label':
@@ -1117,6 +1228,9 @@ async function handleToolCall(name, args) {
 
     case 'set_parent':
       return await setParent(args.issueId, args.parentIssueId);
+
+    case 'list_task_types':
+      return await listTaskTypes(args.project);
 
     default:
       throw new Error(`Unknown tool: ${name}`);
