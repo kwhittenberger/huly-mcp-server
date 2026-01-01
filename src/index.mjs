@@ -538,6 +538,7 @@ async function getIssue(issueId) {
     internalId: issue._id,
     title: issue.title,
     description: descriptionContent,
+    _rawDescription: issue.description,  // DEBUG
     status: status?.name || 'Unknown',
     priority: PRIORITY_NAMES[issue.priority] || 'Unknown',
     labels: issueLabels.map(l => l.title),
