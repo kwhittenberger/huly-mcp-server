@@ -16,7 +16,7 @@ import {
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
-const { connect } = require('@hcengineering/api-client');
+const { connect, markdown } = require('@hcengineering/api-client');
 const { generateId } = require('@hcengineering/core');
 const tracker = require('@hcengineering/tracker').default;
 const tags = require('@hcengineering/tags').default;
@@ -295,6 +295,60 @@ const TOOLS = [
       },
       required: ['name']
     }
+  },
+  {
+    name: 'add_relation',
+    description: 'Add a "related to" relationship between two issues',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        issueId: {
+          type: 'string',
+          description: 'Issue identifier (e.g., "PRYLA-42")'
+        },
+        relatedToIssueId: {
+          type: 'string',
+          description: 'The issue to relate to (e.g., "PRYLA-99")'
+        }
+      },
+      required: ['issueId', 'relatedToIssueId']
+    }
+  },
+  {
+    name: 'add_blocked_by',
+    description: 'Add a "blocked by" dependency between two issues. The first issue is blocked by the second.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        issueId: {
+          type: 'string',
+          description: 'Issue that is blocked (e.g., "PRYLA-42")'
+        },
+        blockedByIssueId: {
+          type: 'string',
+          description: 'The blocking issue (e.g., "PRYLA-99")'
+        }
+      },
+      required: ['issueId', 'blockedByIssueId']
+    }
+  },
+  {
+    name: 'set_parent',
+    description: 'Set the parent issue (e.g., link a task to an epic)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        issueId: {
+          type: 'string',
+          description: 'Child issue identifier (e.g., "PRYLA-42")'
+        },
+        parentIssueId: {
+          type: 'string',
+          description: 'Parent issue identifier (e.g., "PRYLA-1" for an epic)'
+        }
+      },
+      required: ['issueId', 'parentIssueId']
+    }
   }
 ];
 
@@ -491,11 +545,13 @@ async function createIssue(projectIdent, title, description, priority, status, l
     throw new Error(`Project not found: ${projectIdent}`);
   }
 
-  // Get next issue number
-  const existingIssues = await client.findAll(tracker.class.Issue, { space: project._id });
-  const nextNumber = existingIssues.length > 0
-    ? Math.max(...existingIssues.map(i => i.number)) + 1
-    : 1;
+  // Get next issue number from project's sequence counter and increment it
+  const nextNumber = (project.sequence || 0) + 1;
+
+  // Update project's sequence counter
+  await client.updateDoc(tracker.class.Project, project.space || project._id, project._id, {
+    sequence: nextNumber
+  });
 
   // Find status
   let statusId;
@@ -509,24 +565,33 @@ async function createIssue(projectIdent, title, description, priority, status, l
     statusId = todoStatus?._id || statuses[0]?._id;
   }
 
-  // Create issue
+  // Create issue using addCollection (Issues are AttachedDoc, not regular Doc)
   const issueId = generateId();
-  await client.createDoc(tracker.class.Issue, project._id, {
-    title,
-    description: description || '',
-    status: statusId,
-    priority: PRIORITY_MAP[priority?.toLowerCase()] ?? 0,
-    number: nextNumber,
-    assignee: null,
-    component: null,
-    milestone: null,
-    estimation: 0,
-    remainingTime: 0,
-    reportedTime: 0,
-    childInfo: [],
-    parents: [],
-    kind: tracker.taskTypes.Issue
-  }, issueId);
+  await client.addCollection(
+    tracker.class.Issue,
+    project._id,
+    project._id,
+    tracker.class.Project,
+    'issues',
+    {
+      title,
+      identifier: `${project.identifier}-${nextNumber}`,
+      description: description ? markdown(description) : '',
+      status: statusId,
+      priority: PRIORITY_MAP[priority?.toLowerCase()] ?? 0,
+      number: nextNumber,
+      assignee: null,
+      component: null,
+      milestone: null,
+      estimation: 0,
+      remainingTime: 0,
+      reportedTime: 0,
+      childInfo: [],
+      parents: [],
+      kind: tracker.taskTypes.Issue
+    },
+    issueId
+  );
 
   // Add labels if provided
   if (labels && labels.length > 0) {
@@ -580,7 +645,7 @@ async function updateIssue(issueId, title, description, priority, status) {
   }
 
   if (description !== undefined) {
-    updates.description = description;
+    updates.description = markdown(description);
   }
 
   if (priority !== undefined) {
@@ -769,6 +834,126 @@ async function createLabel(name, color) {
   return { message: `Label "${name}" created`, id: tagId };
 }
 
+// Helper to parse issue ID and get issue
+async function parseAndFindIssue(client, issueId) {
+  const match = issueId.match(/^([A-Z0-9]+)-(\d+)$/i);
+  if (!match) {
+    throw new Error(`Invalid issue ID format: ${issueId}. Expected format: PROJECT-NUMBER`);
+  }
+
+  const [, projectId, issueNum] = match;
+
+  const project = await client.findOne(tracker.class.Project, {
+    identifier: projectId.toUpperCase()
+  });
+
+  if (!project) {
+    throw new Error(`Project not found: ${projectId}`);
+  }
+
+  const issue = await client.findOne(tracker.class.Issue, {
+    space: project._id,
+    number: parseInt(issueNum)
+  });
+
+  if (!issue) {
+    throw new Error(`Issue not found: ${issueId}`);
+  }
+
+  return { project, issue };
+}
+
+async function addRelation(issueId, relatedToIssueId) {
+  const client = await getClient();
+
+  // Find both issues
+  const { project, issue } = await parseAndFindIssue(client, issueId);
+  const { issue: relatedIssue } = await parseAndFindIssue(client, relatedToIssueId);
+
+  // Get current relations or initialize empty array
+  const currentRelations = issue.relations || [];
+
+  // Check if relation already exists
+  const alreadyRelated = currentRelations.some(r => r._id === relatedIssue._id);
+  if (alreadyRelated) {
+    return { message: `Issues are already related` };
+  }
+
+  // Add the new relation
+  const newRelations = [...currentRelations, { _id: relatedIssue._id, _class: relatedIssue._class }];
+
+  await client.updateDoc(tracker.class.Issue, project._id, issue._id, {
+    relations: newRelations
+  });
+
+  return {
+    message: `Added relation: ${issueId} is now related to ${relatedToIssueId}`,
+    issueId,
+    relatedToIssueId
+  };
+}
+
+async function addBlockedBy(issueId, blockedByIssueId) {
+  const client = await getClient();
+
+  // Find both issues
+  const { project, issue } = await parseAndFindIssue(client, issueId);
+  const { issue: blockingIssue } = await parseAndFindIssue(client, blockedByIssueId);
+
+  // Get current blockedBy or initialize empty array
+  const currentBlockedBy = issue.blockedBy || [];
+
+  // Check if already blocked by this issue
+  const alreadyBlocked = currentBlockedBy.some(r => r._id === blockingIssue._id);
+  if (alreadyBlocked) {
+    return { message: `${issueId} is already blocked by ${blockedByIssueId}` };
+  }
+
+  // Add the new blocking relation
+  const newBlockedBy = [...currentBlockedBy, { _id: blockingIssue._id, _class: blockingIssue._class }];
+
+  await client.updateDoc(tracker.class.Issue, project._id, issue._id, {
+    blockedBy: newBlockedBy
+  });
+
+  return {
+    message: `Added dependency: ${issueId} is now blocked by ${blockedByIssueId}`,
+    issueId,
+    blockedByIssueId
+  };
+}
+
+async function setParent(issueId, parentIssueId) {
+  const client = await getClient();
+
+  // Find both issues
+  const { project, issue } = await parseAndFindIssue(client, issueId);
+  const { project: parentProject, issue: parentIssue } = await parseAndFindIssue(client, parentIssueId);
+
+  // Build parent info
+  const parentInfo = {
+    parentId: parentIssue._id,
+    identifier: `${parentProject.identifier}-${parentIssue.number}`,
+    parentTitle: parentIssue.title,
+    space: parentProject._id
+  };
+
+  // Update the child issue with the parent reference
+  await client.updateDoc(tracker.class.Issue, project._id, issue._id, {
+    attachedTo: parentIssue._id,
+    parents: [parentInfo]
+  });
+
+  // Update parent's subIssues count (if tracked)
+  // Note: This may be handled automatically by Huly
+
+  return {
+    message: `Set parent: ${issueId} is now a child of ${parentIssueId}`,
+    issueId,
+    parentIssueId
+  };
+}
+
 // Handle tool calls
 async function handleToolCall(name, args) {
   switch (name) {
@@ -820,6 +1005,15 @@ async function handleToolCall(name, args) {
 
     case 'create_label':
       return await createLabel(args.name, args.color);
+
+    case 'add_relation':
+      return await addRelation(args.issueId, args.relatedToIssueId);
+
+    case 'add_blocked_by':
+      return await addBlockedBy(args.issueId, args.blockedByIssueId);
+
+    case 'set_parent':
+      return await setParent(args.issueId, args.parentIssueId);
 
     default:
       throw new Error(`Unknown tool: ${name}`);
