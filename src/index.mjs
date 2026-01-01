@@ -665,11 +665,13 @@ async function updateIssue(issueId, title, description, priority, status) {
     await client.updateDoc(tracker.class.Issue, project._id, issue._id, updates);
   }
 
-  // Handle description update by directly uploading markup
-  // Note: PlatformClient.processMarkup has a bug where uploadMarkup is not awaited
-  // So we manually upload the markup and pass the reference to updateDoc
+  // Handle description update
+  // Note: Collaborative document system requires the collaborator service
   if (description !== undefined) {
     try {
+      console.error('[DEBUG] Attempting description update for issue:', issue._id);
+      console.error('[DEBUG] Description length:', description.length);
+
       // Access the markup operations directly and await the upload
       const markupRef = await client.markup.uploadMarkup(
         tracker.class.Issue,
@@ -678,14 +680,18 @@ async function updateIssue(issueId, title, description, priority, status) {
         description,
         'markdown'
       );
+      console.error('[DEBUG] Markup uploaded successfully, ref:', markupRef);
+
       // Update the issue with the resolved markup reference
       await client.client.updateDoc(tracker.class.Issue, project._id, issue._id, {
         description: markupRef
       });
+      console.error('[DEBUG] Issue updated with new description ref');
       updatedFields.push('description');
     } catch (err) {
-      console.error('Failed to update description:', err.message);
-      throw new Error(`Failed to update description: ${err.message}`);
+      console.error('[DEBUG] Description update failed:', err);
+      console.error('[DEBUG] Error stack:', err.stack);
+      throw new Error(`Description update failed: ${err.message}`);
     }
   }
 
