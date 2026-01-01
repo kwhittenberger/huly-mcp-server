@@ -505,6 +505,9 @@ async function getIssue(issueId) {
 
   // Fetch actual description content (stored as collaborative document)
   let descriptionContent = '';
+  console.error('[DEBUG getIssue] Raw issue.description:', JSON.stringify(issue.description));
+  console.error('[DEBUG getIssue] Type:', typeof issue.description);
+
   if (issue.description) {
     try {
       descriptionContent = await client.fetchMarkup(
@@ -514,9 +517,14 @@ async function getIssue(issueId) {
         issue.description,
         'markdown'
       );
+      console.error('[DEBUG getIssue] Fetched content:', descriptionContent?.substring(0, 100));
     } catch (err) {
-      // Fall back to empty if fetch fails
-      console.error('Failed to fetch description:', err.message);
+      // Fall back to raw description if fetch fails (might be plain string)
+      console.error('[DEBUG getIssue] fetchMarkup failed:', err.message);
+      // If description is a plain string, use it directly
+      if (typeof issue.description === 'string' && !issue.description.includes('-')) {
+        descriptionContent = issue.description;
+      }
     }
   }
 
