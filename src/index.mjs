@@ -538,7 +538,6 @@ async function getIssue(issueId) {
     internalId: issue._id,
     title: issue.title,
     description: descriptionContent,
-    _rawDescription: issue.description,  // DEBUG
     status: status?.name || 'Unknown',
     priority: PRIORITY_NAMES[issue.priority] || 'Unknown',
     labels: issueLabels.map(l => l.title),
@@ -1005,11 +1004,22 @@ async function setParent(issueId, parentIssueId) {
     space: parentProject._id
   };
 
-  // Update the child issue with the parent reference
-  await client.updateDoc(tracker.class.Issue, project._id, issue._id, {
-    attachedTo: parentIssue._id,
-    parents: [parentInfo]
-  });
+  // Use updateCollection to properly register in the subIssues collection
+  // This updates both the child's attachedTo AND the parent's collection counter
+  await client.updateCollection(
+    tracker.class.Issue,       // _class
+    project._id,               // space
+    issue._id,                 // objectId (the child issue)
+    parentIssue._id,           // attachedTo (the parent issue)
+    tracker.class.Issue,       // attachedToClass
+    'subIssues',               // collection name
+    {                          // additional updates to the child
+      parents: [parentInfo],
+      attachedTo: parentIssue._id,
+      attachedToClass: tracker.class.Issue,
+      collection: 'subIssues'
+    }
+  );
 
   // Build child info for the parent
   const childInfo = {
@@ -1033,9 +1043,10 @@ async function setParent(issueId, parentIssueId) {
     updatedChildInfo = [...currentChildInfo, childInfo];
   }
 
-  // Update parent's childInfo array
+  // Update parent's childInfo array and subIssues counter
   await client.updateDoc(tracker.class.Issue, parentProject._id, parentIssue._id, {
-    childInfo: updatedChildInfo
+    childInfo: updatedChildInfo,
+    subIssues: updatedChildInfo.length
   });
 
   return {
