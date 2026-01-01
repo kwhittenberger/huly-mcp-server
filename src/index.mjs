@@ -665,24 +665,34 @@ async function updateIssue(issueId, title, description, priority, status) {
     await client.updateDoc(tracker.class.Issue, project._id, issue._id, updates);
   }
 
-  // Handle description separately using updateMarkup for collaborative docs
+  // Handle description separately - upload new markup and update reference
   if (description !== undefined) {
     try {
-      // Use updateMarkup to properly update collaborative document content
-      await client.updateMarkup(
+      // Upload new markup content and get a reference
+      const markupRef = await client.uploadMarkup(
         tracker.class.Issue,
         issue._id,
         'description',
-        description  // Pass raw markdown, updateMarkup handles conversion
+        description,
+        'markdown'
       );
-      updatedFields.push('description');
-    } catch (err) {
-      // Fallback: try direct update with markdown conversion
-      console.error('updateMarkup failed, trying direct update:', err.message);
+      // Update the issue with the new markup reference
       await client.updateDoc(tracker.class.Issue, project._id, issue._id, {
-        description: markdown(description)
+        description: markupRef
       });
       updatedFields.push('description');
+    } catch (err) {
+      // Fallback: try using MarkupContent wrapper (should trigger processMarkup)
+      console.error('uploadMarkup failed, trying MarkupContent wrapper:', err.message);
+      try {
+        await client.updateDoc(tracker.class.Issue, project._id, issue._id, {
+          description: markdown(description)
+        });
+        updatedFields.push('description');
+      } catch (err2) {
+        console.error('MarkupContent fallback also failed:', err2.message);
+        throw err2;
+      }
     }
   }
 
