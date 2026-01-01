@@ -590,7 +590,7 @@ async function createIssue(projectIdent, title, description, priority, status, l
     {
       title,
       identifier: `${project.identifier}-${nextNumber}`,
-      description: description || '',
+      description: '',  // Start with empty, update after if description provided
       status: statusId,
       priority: PRIORITY_MAP[priority?.toLowerCase()] ?? 0,
       number: nextNumber,
@@ -606,6 +606,28 @@ async function createIssue(projectIdent, title, description, priority, status, l
     },
     issueId
   );
+
+  // If description provided, upload via collaborator service to get proper MarkupBlobRef
+  if (description) {
+    try {
+      const markupRef = await client.markup.uploadMarkup(
+        tracker.class.Issue,
+        issueId,
+        'description',
+        description,
+        'markdown'
+      );
+      await client.updateDoc(tracker.class.Issue, project._id, issueId, {
+        description: markupRef
+      });
+    } catch (err) {
+      console.error('[createIssue] Collaborator error:', err.message);
+      // Fallback to plain string
+      await client.updateDoc(tracker.class.Issue, project._id, issueId, {
+        description: description
+      });
+    }
+  }
 
   // Add labels if provided
   if (labels && labels.length > 0) {
@@ -679,13 +701,34 @@ async function updateIssue(issueId, title, description, priority, status) {
     await client.updateDoc(tracker.class.Issue, project._id, issue._id, updates);
   }
 
-  // Handle description update - store as plain string
-  // This bypasses the collaborative document system which has issues with the API client
+  // Handle description update using collaborative document system
   if (description !== undefined) {
-    await client.updateDoc(tracker.class.Issue, project._id, issue._id, {
-      description: description
-    });
-    updatedFields.push('description');
+    try {
+      // Upload markup to get a proper MarkupBlobRef
+      const markupRef = await client.markup.uploadMarkup(
+        tracker.class.Issue,
+        issue._id,
+        'description',
+        description,
+        'markdown'
+      );
+
+      // Update issue with the blob reference
+      await client.updateDoc(tracker.class.Issue, project._id, issue._id, {
+        description: markupRef
+      });
+      updatedFields.push('description');
+    } catch (err) {
+      // Log detailed error for debugging
+      console.error('[updateIssue] Collaborator error:', err.message);
+
+      // Fallback: store as plain string (won't render in Huly UI but readable via API)
+      console.error('[updateIssue] Falling back to plain string storage');
+      await client.updateDoc(tracker.class.Issue, project._id, issue._id, {
+        description: description
+      });
+      updatedFields.push('description (plain)');
+    }
   }
 
   return {
