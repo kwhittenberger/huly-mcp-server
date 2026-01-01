@@ -665,35 +665,14 @@ async function updateIssue(issueId, title, description, priority, status) {
     await client.updateDoc(tracker.class.Issue, project._id, issue._id, updates);
   }
 
-  // Handle description separately - upload new markup and update reference
+  // Handle description update using MarkupContent wrapper
+  // The PlatformClient.updateDoc processes MarkupContent instances via processMarkup
   if (description !== undefined) {
-    try {
-      // Upload new markup content and get a reference
-      const markupRef = await client.uploadMarkup(
-        tracker.class.Issue,
-        issue._id,
-        'description',
-        description,
-        'markdown'
-      );
-      // Update the issue with the new markup reference
-      await client.updateDoc(tracker.class.Issue, project._id, issue._id, {
-        description: markupRef
-      });
-      updatedFields.push('description');
-    } catch (err) {
-      // Fallback: try using MarkupContent wrapper (should trigger processMarkup)
-      console.error('uploadMarkup failed, trying MarkupContent wrapper:', err.message);
-      try {
-        await client.updateDoc(tracker.class.Issue, project._id, issue._id, {
-          description: markdown(description)
-        });
-        updatedFields.push('description');
-      } catch (err2) {
-        console.error('MarkupContent fallback also failed:', err2.message);
-        throw err2;
-      }
-    }
+    const markupContent = markdown(description);
+    await client.updateDoc(tracker.class.Issue, project._id, issue._id, {
+      description: markupContent
+    });
+    updatedFields.push('description');
   }
 
   return {
