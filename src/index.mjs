@@ -666,13 +666,16 @@ async function updateIssue(issueId, title, description, priority, status) {
   }
 
   // Handle description update
-  // Note: Collaborative document system requires the collaborator service
+  // The description field is MarkupBlobRef | null (a reference to a blob)
+  // The collaborator service handles the actual markup storage
   if (description !== undefined) {
     try {
-      console.error('[DEBUG] Attempting description update for issue:', issue._id);
-      console.error('[DEBUG] Description length:', description.length);
+      // Try using the PlatformClient's built-in markup handling
+      // This should properly await the upload via the fixed processMarkup
+      const markupContent = markdown(description);
 
-      // Access the markup operations directly and await the upload
+      // Create a separate update operation for description with markup
+      // We need to manually handle the MarkupContent since processMarkup doesn't await
       const markupRef = await client.markup.uploadMarkup(
         tracker.class.Issue,
         issue._id,
@@ -680,18 +683,20 @@ async function updateIssue(issueId, title, description, priority, status) {
         description,
         'markdown'
       );
-      console.error('[DEBUG] Markup uploaded successfully, ref:', markupRef);
 
-      // Update the issue with the resolved markup reference
+      // Update the issue with the resolved markup reference using the inner client
       await client.client.updateDoc(tracker.class.Issue, project._id, issue._id, {
         description: markupRef
       });
-      console.error('[DEBUG] Issue updated with new description ref');
       updatedFields.push('description');
     } catch (err) {
-      console.error('[DEBUG] Description update failed:', err);
-      console.error('[DEBUG] Error stack:', err.stack);
-      throw new Error(`Description update failed: ${err.message}`);
+      // If collaborator service fails, the description field may need to be
+      // set up first through the Huly UI before it can be updated via API
+      console.error('Description update failed (collaborator service):', err.message);
+
+      // For now, we can't update descriptions - the collaborator service returned an error
+      // This is a known limitation with self-hosted Huly instances
+      throw new Error(`Description update failed: ${err.message}. Try editing the description first in the Huly UI to initialize it.`);
     }
   }
 
