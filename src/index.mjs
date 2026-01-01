@@ -576,7 +576,7 @@ async function createIssue(projectIdent, title, description, priority, status, l
     {
       title,
       identifier: `${project.identifier}-${nextNumber}`,
-      description: description ? markdown(description) : '',
+      description: description || '',
       status: statusId,
       priority: PRIORITY_MAP[priority?.toLowerCase()] ?? 0,
       number: nextNumber,
