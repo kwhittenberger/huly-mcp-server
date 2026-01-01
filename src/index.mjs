@@ -639,17 +639,16 @@ async function updateIssue(issueId, title, description, priority, status) {
 
   // Build update operations
   const updates = {};
+  const updatedFields = [];
 
   if (title !== undefined) {
     updates.title = title;
-  }
-
-  if (description !== undefined) {
-    updates.description = markdown(description);
+    updatedFields.push('title');
   }
 
   if (priority !== undefined) {
     updates.priority = PRIORITY_MAP[priority.toLowerCase()] ?? issue.priority;
+    updatedFields.push('priority');
   }
 
   if (status !== undefined) {
@@ -657,16 +656,39 @@ async function updateIssue(issueId, title, description, priority, status) {
     const found = statuses.find(s => s.name.toLowerCase() === status.toLowerCase());
     if (found) {
       updates.status = found._id;
+      updatedFields.push('status');
     }
   }
 
+  // Apply non-description updates
   if (Object.keys(updates).length > 0) {
     await client.updateDoc(tracker.class.Issue, project._id, issue._id, updates);
   }
 
+  // Handle description separately using updateMarkup for collaborative docs
+  if (description !== undefined) {
+    try {
+      // Use updateMarkup to properly update collaborative document content
+      await client.updateMarkup(
+        tracker.class.Issue,
+        issue._id,
+        'description',
+        description  // Pass raw markdown, updateMarkup handles conversion
+      );
+      updatedFields.push('description');
+    } catch (err) {
+      // Fallback: try direct update with markdown conversion
+      console.error('updateMarkup failed, trying direct update:', err.message);
+      await client.updateDoc(tracker.class.Issue, project._id, issue._id, {
+        description: markdown(description)
+      });
+      updatedFields.push('description');
+    }
+  }
+
   return {
     id: issueId,
-    updated: Object.keys(updates)
+    updated: updatedFields
   };
 }
 
