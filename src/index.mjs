@@ -503,28 +503,33 @@ async function getIssue(issueId) {
     attachedTo: issue._id
   });
 
-  // Fetch actual description content (stored as collaborative document)
+  // Get description content
+  // Description can be either:
+  // 1. A MarkupBlobRef (format: objectId-attr-timestamp) pointing to collaborative document
+  // 2. A plain string (when set via API without collaborative document)
   let descriptionContent = '';
-  console.error('[DEBUG getIssue] Raw issue.description:', JSON.stringify(issue.description));
-  console.error('[DEBUG getIssue] Type:', typeof issue.description);
-
   if (issue.description) {
-    try {
-      descriptionContent = await client.fetchMarkup(
-        tracker.class.Issue,
-        issue._id,
-        'description',
-        issue.description,
-        'markdown'
-      );
-      console.error('[DEBUG getIssue] Fetched content:', descriptionContent?.substring(0, 100));
-    } catch (err) {
-      // Fall back to raw description if fetch fails (might be plain string)
-      console.error('[DEBUG getIssue] fetchMarkup failed:', err.message);
-      // If description is a plain string, use it directly
-      if (typeof issue.description === 'string' && !issue.description.includes('-')) {
+    // Check if it looks like a blob reference (contains timestamp pattern)
+    const looksLikeBlobRef = typeof issue.description === 'string' &&
+      /^[a-f0-9]+-description-\d+$/.test(issue.description);
+
+    if (looksLikeBlobRef) {
+      // Try to fetch from collaborative document system
+      try {
+        descriptionContent = await client.fetchMarkup(
+          tracker.class.Issue,
+          issue._id,
+          'description',
+          issue.description,
+          'markdown'
+        );
+      } catch (err) {
+        // Fallback to raw value if fetch fails
         descriptionContent = issue.description;
       }
+    } else {
+      // Plain string - use directly
+      descriptionContent = issue.description;
     }
   }
 
@@ -533,7 +538,6 @@ async function getIssue(issueId) {
     internalId: issue._id,
     title: issue.title,
     description: descriptionContent,
-    _rawDescription: issue.description,  // DEBUG: show raw value
     status: status?.name || 'Unknown',
     priority: PRIORITY_NAMES[issue.priority] || 'Unknown',
     labels: issueLabels.map(l => l.title),
@@ -674,39 +678,13 @@ async function updateIssue(issueId, title, description, priority, status) {
     await client.updateDoc(tracker.class.Issue, project._id, issue._id, updates);
   }
 
-  // Handle description update
-  // The description field is MarkupBlobRef | null (a reference to a blob)
-  // The collaborator service handles the actual markup storage
+  // Handle description update - store as plain string
+  // This bypasses the collaborative document system which has issues with the API client
   if (description !== undefined) {
-    try {
-      // Try using the PlatformClient's built-in markup handling
-      // This should properly await the upload via the fixed processMarkup
-      const markupContent = markdown(description);
-
-      // Create a separate update operation for description with markup
-      // We need to manually handle the MarkupContent since processMarkup doesn't await
-      const markupRef = await client.markup.uploadMarkup(
-        tracker.class.Issue,
-        issue._id,
-        'description',
-        description,
-        'markdown'
-      );
-
-      // Update the issue with the resolved markup reference using the inner client
-      await client.client.updateDoc(tracker.class.Issue, project._id, issue._id, {
-        description: markupRef
-      });
-      updatedFields.push('description');
-    } catch (err) {
-      // If collaborator service fails, the description field may need to be
-      // set up first through the Huly UI before it can be updated via API
-      console.error('Description update failed (collaborator service):', err.message);
-
-      // For now, we can't update descriptions - the collaborator service returned an error
-      // This is a known limitation with self-hosted Huly instances
-      throw new Error(`Description update failed: ${err.message}. Try editing the description first in the Huly UI to initialize it.`);
-    }
+    await client.updateDoc(tracker.class.Issue, project._id, issue._id, {
+      description: description
+    });
+    updatedFields.push('description');
   }
 
   return {
