@@ -371,6 +371,15 @@ const TOOLS = [
       },
       required: ['project']
     }
+  },
+  {
+    name: 'list_statuses',
+    description: 'List all available issue statuses in the workspace',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      required: []
+    }
   }
 ];
 
@@ -555,6 +564,22 @@ async function getIssue(issueId) {
     }
   }
 
+  // Get parent issue if this issue has one
+  let parentId = null;
+  if (issue.attachedTo && issue.attachedToClass === tracker.class.Issue) {
+    const parentIssue = await client.findOne(tracker.class.Issue, { _id: issue.attachedTo });
+    if (parentIssue) {
+      // Find parent's project to get identifier
+      const parentProject = await client.findOne(tracker.class.Project, { _id: parentIssue.space });
+      if (parentProject) {
+        parentId = `${parentProject.identifier}-${parentIssue.number}`;
+      }
+    }
+  }
+
+  // Get child issues count
+  const childCount = issue.subIssues || 0;
+
   return {
     id: `${project.identifier}-${issue.number}`,
     internalId: issue._id,
@@ -563,6 +588,8 @@ async function getIssue(issueId) {
     status: status?.name || 'Unknown',
     priority: PRIORITY_NAMES[issue.priority] || 'Unknown',
     labels: issueLabels.map(l => l.title),
+    parent: parentId,
+    childCount: childCount,
     createdOn: issue.createdOn,
     modifiedOn: issue.modifiedOn
   };
@@ -716,10 +743,17 @@ async function updateIssue(issueId, title, description, priority, status, type) 
 
   if (status !== undefined) {
     const statuses = await client.findAll(tracker.class.IssueStatus, {});
+    console.error(`[updateIssue] Available statuses: ${statuses.map(s => `${s.name} (${s._id})`).join(', ')}`);
+    console.error(`[updateIssue] Looking for status: "${status}"`);
+    console.error(`[updateIssue] Current issue status: ${issue.status}`);
+
     const found = statuses.find(s => s.name.toLowerCase() === status.toLowerCase());
     if (found) {
+      console.error(`[updateIssue] Found status: ${found.name} (${found._id})`);
       updates.status = found._id;
       updatedFields.push('status');
+    } else {
+      console.error(`[updateIssue] Status "${status}" not found!`);
     }
   }
 
@@ -732,7 +766,10 @@ async function updateIssue(issueId, title, description, priority, status, type) 
 
   // Apply non-description updates
   if (Object.keys(updates).length > 0) {
+    console.error(`[updateIssue] Applying updates to ${issueId}:`, JSON.stringify(updates));
+    console.error(`[updateIssue] project._id: ${project._id}, issue._id: ${issue._id}`);
     await client.updateDoc(tracker.class.Issue, project._id, issue._id, updates);
+    console.error(`[updateIssue] updateDoc completed`);
   }
 
   // Handle description update using collaborative document system
@@ -1166,6 +1203,21 @@ async function findTaskTypeByName(client, projectIdent, typeName) {
   return found._id;
 }
 
+async function listStatuses() {
+  const client = await getClient();
+
+  // Get all issue statuses
+  const statuses = await client.findAll(tracker.class.IssueStatus, {});
+
+  return statuses.map(s => ({
+    id: s._id,
+    name: s.name,
+    category: s.category,
+    color: s.color,
+    description: s.description || ''
+  }));
+}
+
 // Handle tool calls
 async function handleToolCall(name, args) {
   switch (name) {
@@ -1231,6 +1283,9 @@ async function handleToolCall(name, args) {
 
     case 'list_task_types':
       return await listTaskTypes(args.project);
+
+    case 'list_statuses':
+      return await listStatuses();
 
     default:
       throw new Error(`Unknown tool: ${name}`);
