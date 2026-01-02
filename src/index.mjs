@@ -38,6 +38,18 @@ const PRIORITY_MAP = {
 
 const PRIORITY_NAMES = ['No Priority', 'Urgent', 'High', 'Medium', 'Low'];
 
+// Milestone status mapping
+const MILESTONE_STATUS_MAP = {
+  'planned': 0,
+  'in progress': 1,
+  'inprogress': 1,
+  'completed': 2,
+  'canceled': 3,
+  'cancelled': 3
+};
+
+const MILESTONE_STATUS_NAMES = ['Planned', 'In Progress', 'Completed', 'Canceled'];
+
 // Cached client connection
 let cachedClient = null;
 let connectionPromise = null;
@@ -145,6 +157,10 @@ const TOOLS = [
         label: {
           type: 'string',
           description: 'Filter by label name'
+        },
+        milestone: {
+          type: 'string',
+          description: 'Filter by milestone name'
         },
         limit: {
           type: 'number',
@@ -380,6 +396,90 @@ const TOOLS = [
       properties: {},
       required: []
     }
+  },
+  {
+    name: 'list_milestones',
+    description: 'List all milestones in a project',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: {
+          type: 'string',
+          description: 'Project identifier (e.g., "PRYLA")'
+        },
+        status: {
+          type: 'string',
+          description: 'Filter by status (Planned, In Progress, Completed, Canceled)'
+        }
+      },
+      required: ['project']
+    }
+  },
+  {
+    name: 'get_milestone',
+    description: 'Get a specific milestone by name or ID',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: {
+          type: 'string',
+          description: 'Project identifier (e.g., "PRYLA")'
+        },
+        name: {
+          type: 'string',
+          description: 'Milestone name/label to find'
+        }
+      },
+      required: ['project', 'name']
+    }
+  },
+  {
+    name: 'create_milestone',
+    description: 'Create a new milestone in a project',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: {
+          type: 'string',
+          description: 'Project identifier (e.g., "PRYLA")'
+        },
+        name: {
+          type: 'string',
+          description: 'Milestone name/label'
+        },
+        description: {
+          type: 'string',
+          description: 'Milestone description'
+        },
+        targetDate: {
+          type: 'string',
+          description: 'Target date (ISO 8601 format, e.g., "2025-03-01")'
+        },
+        status: {
+          type: 'string',
+          description: 'Initial status (Planned, In Progress, Completed, Canceled). Default: Planned'
+        }
+      },
+      required: ['project', 'name']
+    }
+  },
+  {
+    name: 'set_milestone',
+    description: 'Set or clear the milestone for an issue',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        issueId: {
+          type: 'string',
+          description: 'Issue identifier (e.g., "PRYLA-42")'
+        },
+        milestone: {
+          type: 'string',
+          description: 'Milestone name to set, or empty/null to clear'
+        }
+      },
+      required: ['issueId']
+    }
   }
 ];
 
@@ -423,7 +523,7 @@ async function getProject(identifier) {
   };
 }
 
-async function listIssues(project, status, priority, label, limit = 50) {
+async function listIssues(project, status, priority, label, milestone, limit = 50) {
   const client = await getClient();
 
   // Find project
@@ -440,6 +540,20 @@ async function listIssues(project, status, priority, label, limit = 50) {
 
   if (priority) {
     query.priority = PRIORITY_MAP[priority.toLowerCase()] ?? 0;
+  }
+
+  // Get milestones for filtering and resolving names
+  const milestones = await client.findAll(tracker.class.Milestone, { space: proj._id });
+  const milestoneMap = new Map(milestones.map(m => [m._id, m.label]));
+
+  // Filter by milestone if provided
+  let milestoneFilter = null;
+  if (milestone) {
+    const found = milestones.find(m => m.label.toLowerCase() === milestone.toLowerCase());
+    if (found) {
+      milestoneFilter = found._id;
+      query.milestone = found._id;
+    }
   }
 
   // Get issues
@@ -472,7 +586,7 @@ async function listIssues(project, status, priority, label, limit = 50) {
     }
   }
 
-  // Build result with labels
+  // Build result with labels and milestone
   const result = [];
   for (const issue of issues) {
     const issueLabels = await client.findAll(tags.class.TagReference, {
@@ -489,7 +603,8 @@ async function listIssues(project, status, priority, label, limit = 50) {
       title: issue.title,
       status: statusMap.get(issue.status) || 'Unknown',
       priority: PRIORITY_NAMES[issue.priority] || 'Unknown',
-      labels: issueLabels.map(l => l.title)
+      labels: issueLabels.map(l => l.title),
+      milestone: issue.milestone ? milestoneMap.get(issue.milestone) || null : null
     });
   }
 
@@ -580,6 +695,19 @@ async function getIssue(issueId) {
   // Get child issues count
   const childCount = issue.subIssues || 0;
 
+  // Get milestone if assigned
+  let milestoneInfo = null;
+  if (issue.milestone) {
+    const milestone = await client.findOne(tracker.class.Milestone, { _id: issue.milestone });
+    if (milestone) {
+      milestoneInfo = {
+        id: milestone._id,
+        name: milestone.label,
+        status: MILESTONE_STATUS_NAMES[milestone.status] || 'Unknown'
+      };
+    }
+  }
+
   return {
     id: `${project.identifier}-${issue.number}`,
     internalId: issue._id,
@@ -592,6 +720,7 @@ async function getIssue(issueId) {
     labels: issueLabels.map(l => l.title),
     parent: parentId,
     childCount: childCount,
+    milestone: milestoneInfo,
     createdOn: issue.createdOn,
     modifiedOn: issue.modifiedOn
   };
@@ -1220,6 +1349,220 @@ async function listStatuses() {
   }));
 }
 
+// Milestone functions
+async function listMilestones(projectIdent, status) {
+  const client = await getClient();
+
+  // Find project
+  const project = await client.findOne(tracker.class.Project, {
+    identifier: projectIdent.toUpperCase()
+  });
+
+  if (!project) {
+    throw new Error(`Project not found: ${projectIdent}`);
+  }
+
+  // Build query
+  const query = { space: project._id };
+
+  // Filter by status if provided
+  if (status) {
+    const statusValue = MILESTONE_STATUS_MAP[status.toLowerCase()];
+    if (statusValue !== undefined) {
+      query.status = statusValue;
+    }
+  }
+
+  // Get milestones
+  const milestones = await client.findAll(tracker.class.Milestone, query, {
+    sort: { targetDate: 1 }
+  });
+
+  return milestones.map(m => ({
+    id: m._id,
+    name: m.label,
+    description: m.description || '',
+    status: MILESTONE_STATUS_NAMES[m.status] || 'Unknown',
+    targetDate: m.targetDate ? new Date(m.targetDate).toISOString().split('T')[0] : null,
+    comments: m.comments || 0
+  }));
+}
+
+async function getMilestone(projectIdent, name) {
+  const client = await getClient();
+
+  // Find project
+  const project = await client.findOne(tracker.class.Project, {
+    identifier: projectIdent.toUpperCase()
+  });
+
+  if (!project) {
+    throw new Error(`Project not found: ${projectIdent}`);
+  }
+
+  // Find milestone by name (case-insensitive)
+  const milestones = await client.findAll(tracker.class.Milestone, {
+    space: project._id
+  });
+
+  const milestone = milestones.find(m =>
+    m.label.toLowerCase() === name.toLowerCase()
+  );
+
+  if (!milestone) {
+    throw new Error(`Milestone not found: ${name}`);
+  }
+
+  // Count issues in this milestone
+  const issues = await client.findAll(tracker.class.Issue, {
+    space: project._id,
+    milestone: milestone._id
+  });
+
+  return {
+    id: milestone._id,
+    name: milestone.label,
+    description: milestone.description || '',
+    status: MILESTONE_STATUS_NAMES[milestone.status] || 'Unknown',
+    targetDate: milestone.targetDate ? new Date(milestone.targetDate).toISOString().split('T')[0] : null,
+    comments: milestone.comments || 0,
+    issueCount: issues.length
+  };
+}
+
+async function createMilestone(projectIdent, name, description, targetDate, status) {
+  const client = await getClient();
+
+  // Find project
+  const project = await client.findOne(tracker.class.Project, {
+    identifier: projectIdent.toUpperCase()
+  });
+
+  if (!project) {
+    throw new Error(`Project not found: ${projectIdent}`);
+  }
+
+  // Check if milestone already exists
+  const existing = await client.findOne(tracker.class.Milestone, {
+    space: project._id,
+    label: name
+  });
+
+  if (existing) {
+    return {
+      message: `Milestone "${name}" already exists`,
+      id: existing._id,
+      name: existing.label
+    };
+  }
+
+  // Parse target date
+  let targetTimestamp = Date.now() + (30 * 24 * 60 * 60 * 1000); // Default: 30 days from now
+  if (targetDate) {
+    const parsed = new Date(targetDate);
+    if (!isNaN(parsed.getTime())) {
+      targetTimestamp = parsed.getTime();
+    }
+  }
+
+  // Parse status
+  let statusValue = 0; // Default: Planned
+  if (status) {
+    const parsed = MILESTONE_STATUS_MAP[status.toLowerCase()];
+    if (parsed !== undefined) {
+      statusValue = parsed;
+    }
+  }
+
+  // Create milestone
+  const milestoneId = generateId();
+  await client.createDoc(tracker.class.Milestone, project._id, {
+    label: name,
+    description: description || '',
+    status: statusValue,
+    targetDate: targetTimestamp,
+    comments: 0,
+    attachments: 0
+  }, milestoneId);
+
+  return {
+    message: `Milestone "${name}" created`,
+    id: milestoneId,
+    name,
+    status: MILESTONE_STATUS_NAMES[statusValue],
+    targetDate: new Date(targetTimestamp).toISOString().split('T')[0]
+  };
+}
+
+async function setMilestone(issueId, milestoneName) {
+  const client = await getClient();
+
+  // Parse and find issue
+  const match = issueId.match(/^([A-Z0-9]+)-(\d+)$/i);
+  if (!match) {
+    throw new Error(`Invalid issue ID format: ${issueId}`);
+  }
+
+  const [, projectId, issueNum] = match;
+
+  const project = await client.findOne(tracker.class.Project, {
+    identifier: projectId.toUpperCase()
+  });
+
+  if (!project) {
+    throw new Error(`Project not found: ${projectId}`);
+  }
+
+  const issue = await client.findOne(tracker.class.Issue, {
+    space: project._id,
+    number: parseInt(issueNum)
+  });
+
+  if (!issue) {
+    throw new Error(`Issue not found: ${issueId}`);
+  }
+
+  // If milestone name is empty/null, clear the milestone
+  if (!milestoneName || milestoneName.trim() === '') {
+    await client.updateDoc(tracker.class.Issue, project._id, issue._id, {
+      milestone: null
+    });
+    return {
+      message: `Cleared milestone from ${issueId}`,
+      issueId,
+      milestone: null
+    };
+  }
+
+  // Find milestone by name
+  const milestones = await client.findAll(tracker.class.Milestone, {
+    space: project._id
+  });
+
+  const milestone = milestones.find(m =>
+    m.label.toLowerCase() === milestoneName.toLowerCase()
+  );
+
+  if (!milestone) {
+    const available = milestones.map(m => m.label).join(', ');
+    throw new Error(`Milestone "${milestoneName}" not found. Available milestones: ${available || 'none'}`);
+  }
+
+  // Update issue with milestone
+  await client.updateDoc(tracker.class.Issue, project._id, issue._id, {
+    milestone: milestone._id
+  });
+
+  return {
+    message: `Set milestone "${milestone.label}" on ${issueId}`,
+    issueId,
+    milestone: {
+      id: milestone._id,
+      name: milestone.label
+    }
+  };
+}
+
 // Handle tool calls
 async function handleToolCall(name, args) {
   switch (name) {
@@ -1235,6 +1578,7 @@ async function handleToolCall(name, args) {
         args.status,
         args.priority,
         args.label,
+        args.milestone,
         args.limit
       );
 
@@ -1288,6 +1632,24 @@ async function handleToolCall(name, args) {
 
     case 'list_statuses':
       return await listStatuses();
+
+    case 'list_milestones':
+      return await listMilestones(args.project, args.status);
+
+    case 'get_milestone':
+      return await getMilestone(args.project, args.name);
+
+    case 'create_milestone':
+      return await createMilestone(
+        args.project,
+        args.name,
+        args.description,
+        args.targetDate,
+        args.status
+      );
+
+    case 'set_milestone':
+      return await setMilestone(args.issueId, args.milestone);
 
     default:
       throw new Error(`Unknown tool: ${name}`);
